@@ -127,7 +127,7 @@ def construct_trainset(rawtest, esObj):
     rcd = set()
     tot_data = []
     trainf = open('../data/train.txt','w',encoding='utf-8')
-    testf = open('../data/test.txt', 'w', encoding='utf-8')
+    testf = open('../data/dev.txt', 'w', encoding='utf-8')
     for line in tqdm(rawtest):
         action = {
             'doc': line

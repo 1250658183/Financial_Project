@@ -17,6 +17,7 @@ import logging, json, re, math, shutil
 from transformers import BertForSequenceClassification, BertConfig, BertTokenizerFast, BertTokenizer
 from data.data_utils import Financial_Dataset, collect_fn
 from torch.utils.data import DataLoader
+from sklearn.metrics import f1_score
 
 class Financial_Task(pl.LightningModule):
     def __init__(self, args):
@@ -31,7 +32,11 @@ class Financial_Task(pl.LightningModule):
         # Model
         self.config = BertConfig.from_pretrained(args.bert_path)
         setattr(self.config, 'num_labels', args.num_labels)
-        self.model = BertForSequenceClassification.from_pretrained(args.bert_path, config=self.config)
+        if not args.TestModel:
+            self.model = BertForSequenceClassification.from_pretrained(args.bert_path, config=self.config)
+        else:
+            self.model = BertForSequenceClassification(self.config)
+
 
         format = '%(asctime)s - %(name)s - %(message)s'
         if not args.TestModel:
@@ -79,10 +84,15 @@ class Financial_Task(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         output = self.model(**batch)
         loss = output['loss']
-        return {"loss": loss}
+        pred = torch.argmax(output['logits'], dim=-1)
+        label = batch['labels']
+        return {"loss": loss, 'pred': pred, 'label': label}
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.sum(torch.stack([x["loss"] for x in outputs]))
+        preds = torch.cat([x["pred"] for x in outputs], dim=0).tolist()
+        labels = torch.cat([x["label"] for x in outputs], dim=0).tolist()
+        dev_f1 = f1_score(labels, preds, average='micro')
         self.result_logger.info(
             f"EVAL INFO -> current_epoch is: {self.trainer.current_epoch}, current_global_step is: {self.trainer.global_step}"
             f" , current_lr is: {self.trainer.optimizers[0].param_groups[0]['lr']}"
@@ -92,34 +102,36 @@ class Financial_Task(pl.LightningModule):
         if self.local_rank <= 0:
             print(f"EVAL INFO -> current_epoch is: {self.trainer.current_epoch}, current_global_step is: {self.trainer.global_step}"
             f" , current_lr is: {self.trainer.optimizers[0].param_groups[0]['lr']}"
-            f" , current_val_loss is: {avg_loss}")
+            f" , current_val_loss is: {avg_loss}, dev_f1 is: {dev_f1}, ")
 
         self.log('val_loss', avg_loss)
-        return {"val_loss": avg_loss}
+        self.log('dev_f1', dev_f1)
+        return {"val_loss": avg_loss, 'dev_f1': dev_f1}
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        input_ids, attention_masks, labels = batch
-        output = self.model.generate(input_ids, forced_bos_token_id=self.args.forced_bos_token_id)
-        print(output[:, 1:20].tolist())
-        print(labels.tolist())
+        indices = batch.pop('labels')
+        output = self.model(**batch)
+        pred = torch.argmax(output['logits'], dim=-1)
+        return {'pred': pred, 'indices': indices}
 
     def train_dataloader(self):
         return self.get_dataloader("train")
     def val_dataloader(self):
         return self.get_dataloader("dev")
     def test_dataloader(self):
-        return self.get_dataloader("dev")
+        return self.get_dataloader("test")
 
     def get_dataloader(self, prefix="train", limit=None):
         tokenizer = BertTokenizer.from_pretrained(self.args.bert_path)
         if prefix == "train":
-            train_dataset = Financial_Dataset(self.args, tokenizer, data_path=os.path.join(self.args.data_root, 'train.CSV'), split='train')
+            train_dataset = Financial_Dataset(self.args, tokenizer, data_path=os.path.join(self.args.data_root, 'train.txt'), split='train')
             dataloader = DataLoader(train_dataset, batch_size=self.args.train_batch_size, num_workers=self.args.workers, drop_last=False, shuffle=False, collate_fn=collect_fn)
         elif prefix == 'dev':
-            dev_dataset = Financial_Dataset(self.args, tokenizer, data_path=os.path.join(self.args.data_root, 'train.CSV'), split='train')
+            dev_dataset = Financial_Dataset(self.args, tokenizer, data_path=os.path.join(self.args.data_root, 'dev.txt'), split='train')
             dataloader = DataLoader(dev_dataset, batch_size=self.args.train_batch_size, num_workers=self.args.workers, drop_last=False, shuffle=False, collate_fn=collect_fn)
         else:
-            pass
+            dev_dataset = Financial_Dataset(self.args, tokenizer, data_path=os.path.join(self.args.data_root, 'test.txt'), split='test')
+            dataloader = DataLoader(dev_dataset, batch_size=self.args.train_batch_size, num_workers=self.args.workers, drop_last=False, shuffle=False, collate_fn=collect_fn)
         return dataloader
 
 def str2bool(v):
@@ -131,7 +143,7 @@ def get_parser():
     parser.add_argument('--num_labels', type=int, default=3)
     parser.add_argument('--max_length', type=int, default=50)
     parser.add_argument('--TestModel', type=str2bool, default=False)
-    parser.add_argument('--data_root', type=str, default='./data')
+    parser.add_argument('--data_root', type=str, default='../data')
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--eval_batch_size', type=int, default=32)
     return parser
@@ -142,16 +154,14 @@ def main(gpus=None):
     args = parser.parse_args()
 
     # args.gpus = gpus if gpus is not None else len(over_gpus.split(','))
-    args.gpus = [0]
-    args.max_epochs = 10
+    args.gpus = [2]
+    args.max_epochs = 50
     cache_path = './models'
-    best_model_path = ''
-
     args.cache_path = cache_path
     args.workers = 4
-    args.save_path = './checkpoints'
+    args.save_path = './checkpoints/run1'
     args.save_top_k = 1
-    args.monitor = 'dev_acc'
+    args.monitor = 'dev_f1'
     args.mode = 'max'
     args.warmup_proportion = 0.01
     args.no_lr_scheduler = False
@@ -162,7 +172,7 @@ def main(gpus=None):
     args.val_check_interval = 1.0
 
     args.accumulate_grad_batches = 1
-    args.precision = 16
+    args.precision = 32
     args.accelerator = 'ddp'
     args.gradient_clip_val = 5.0
 
@@ -181,7 +191,7 @@ def main(gpus=None):
     if not args.TestModel:
         checkpoint_callback = ModelCheckpoint(
             dirpath = os.path.join(args.save_path, "checkpoint"),
-            filename = '{epoch:02d}-{dev_acc:.4f}',
+            filename = '{epoch:02d}-{dev_f1:.4f}',
             save_top_k=args.save_top_k,
             save_last=True,
             monitor=args.monitor,
@@ -203,7 +213,21 @@ def main(gpus=None):
                                              )
         trainer.fit(model)
     else:
-        pass
+        best_model_path = './checkpoints/run1/checkpoint/epoch=01-dev_f1=0.7109.ckpt'
+        checkpoint = torch.load(best_model_path)
+        model_weights = checkpoint["state_dict"]
+        for key in list(model_weights):
+            model_weights[key.replace("model.", "")] = model_weights.pop(key)
+        model.model.load_state_dict(model_weights)
+        trainer = Trainer.from_argparse_args(args)
+        predictions = trainer.predict(model, model.get_dataloader('test'))
+        preds = torch.cat([x["pred"] for x in predictions], dim=0).tolist()
+        indices = torch.cat([x["indices"] for x in predictions], dim=0).tolist()
+        preds = sorted([(a, b) for a, b in zip(indices, preds)], key=lambda x: x[0])
+        for idx, p in preds:
+            print(idx, p)
+
+
 
 def out_file_call(gpus):
     from multiprocessing import freeze_support
