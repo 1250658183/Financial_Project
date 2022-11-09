@@ -142,7 +142,7 @@ def construct_trainset(rawtest, esObj):
             else:
                 continue
             label = int(rstline['_source']['label']) + 1
-            tot_data.append(id + '\t' + sent + '\t' + str(label) + '\t')
+            tot_data.append(id + '\t' + sent + '\t' + str(label) + '\n')
     random.shuffle(tot_data)
 
     for line in tot_data[:int(len(tot_data)/5*4)]:
