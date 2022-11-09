@@ -19,6 +19,12 @@ from data.data_utils import Financial_Dataset, collect_fn
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 
+def distributed_concat(tensor, num_total_examples):
+    output_tensors = [tensor.clone() for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(output_tensors, tensor)
+    concat = torch.cat(output_tensors, dim=0)
+    return concat[:num_total_examples]
+
 class Financial_Task(pl.LightningModule):
     def __init__(self, args):
         super(Financial_Task, self).__init__()
@@ -36,8 +42,6 @@ class Financial_Task(pl.LightningModule):
             self.model = BertForSequenceClassification.from_pretrained(args.bert_path, config=self.config)
         else:
             self.model = BertForSequenceClassification(self.config)
-
-
         format = '%(asctime)s - %(name)s - %(message)s'
         if not args.TestModel:
             logging.basicConfig(format=format, filename=os.path.join(self.args.save_path, "eval_result_log.txt"), level=logging.INFO)
@@ -60,11 +64,10 @@ class Financial_Task(pl.LightningModule):
         optimizer = optim.AdamW(optimizer_grouped_parameters, betas=(0.9, 0.999), lr=self.args.lr, eps=self.args.adam_epsilon, )
 
         # num_gpus = len([x for x in str(self.args.gpus).split(",") if x.strip()])
-        if isinstance(self.args.gpus, int): num_gpus = self.args.gpus
+        if isinstance(self.args.gpus, int): num_gpus = self.args.gpus if self.args.gpus >= 0 else torch.distributed.get_world_size()
         elif isinstance(self.args.gpus, str): num_gpus = len(self.args.gpus.split(','))
         elif isinstance(self.args.gpus, list): num_gpus = len(self.args.gpus)
-        # num_gpus = len(self.args.gpus)
-        t_total = (len(self.train_dataloader()) // (self.args.accumulate_grad_batches * num_gpus)) * self.args.max_epochs
+        t_total = (len(self.train_dataloader()) // (self.args.accumulate_grad_batches * num_gpus)) * self.args.epochs
         warmup_steps = int(self.args.warmup_proportion * t_total)
         if self.args.no_lr_scheduler:
             return [optimizer]
@@ -90,8 +93,11 @@ class Financial_Task(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.sum(torch.stack([x["loss"] for x in outputs]))
-        preds = torch.cat([x["pred"] for x in outputs], dim=0).tolist()
-        labels = torch.cat([x["label"] for x in outputs], dim=0).tolist()
+        preds = torch.cat([x["pred"] for x in outputs], dim=0)
+        labels = torch.cat([x["label"] for x in outputs], dim=0)
+        preds = distributed_concat(preds, int(1e9)).tolist()
+        labels = distributed_concat(labels, int(1e9)).tolist()
+
         dev_f1 = f1_score(labels, preds, average='micro')
         self.result_logger.info(
             f"EVAL INFO -> current_epoch is: {self.trainer.current_epoch}, current_global_step is: {self.trainer.global_step}"
@@ -146,6 +152,7 @@ def get_parser():
     parser.add_argument('--data_root', type=str, default='../data')
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--eval_batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=50)
     return parser
 
 def main(gpus=None):
@@ -154,8 +161,7 @@ def main(gpus=None):
     args = parser.parse_args()
 
     # args.gpus = gpus if gpus is not None else len(over_gpus.split(','))
-    args.gpus = [2]
-    args.max_epochs = 50
+    args.gpus = -1
     cache_path = './models'
     args.cache_path = cache_path
     args.workers = 4
@@ -226,8 +232,6 @@ def main(gpus=None):
         preds = sorted([(a, b) for a, b in zip(indices, preds)], key=lambda x: x[0])
         for idx, p in preds:
             print(idx, p)
-
-
 
 def out_file_call(gpus):
     from multiprocessing import freeze_support
