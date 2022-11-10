@@ -25,9 +25,10 @@ class Financial_Dataset(Dataset):
             dataset = load_dataset("csv", data_files=data_path, split=split, encoding='utf-8', sep="	")
             dataset = dataset.map(lambda x: self.convert_to_id(x, tokenizer, maxlen=args.max_length), num_proc=8, batched=False)
         else:
-            dataset = load_dataset("csv", data_files=data_path, split='train', encoding='gbk', sep="	")
+            dataset = load_dataset("csv", data_files='/home/nlper_data/zongwz/data/mantest.txt', split='train', encoding='utf-8', sep="	")
             dataset = dataset.rename_column('reason', 'Text')
-            dataset = dataset.map(lambda x, idx: self.convert_to_id(x, tokenizer, maxlen=args.max_length, idx=idx), with_indices=True, num_proc=1, batched=False)
+            # dataset = dataset.map(lambda x, idx: self.convert_to_id(x, tokenizer, maxlen=args.max_length, idx=idx), with_indices=True, num_proc=1, batched=False)
+            dataset = dataset.map(lambda x: self.convert_to_id(x, tokenizer, maxlen=args.max_length), num_proc=1, batched=False)
         self.dataset = dataset
         print(self.dataset)
 

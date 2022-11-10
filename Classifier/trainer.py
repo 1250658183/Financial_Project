@@ -17,7 +17,7 @@ import logging, json, re, math, shutil
 from transformers import BertForSequenceClassification, BertConfig, BertTokenizerFast, BertTokenizer
 from data.data_utils import Financial_Dataset, collect_fn
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_recall_fscore_support
 
 def distributed_concat(tensor, num_total_examples):
     output_tensors = [tensor.clone() for _ in range(torch.distributed.get_world_size())]
@@ -145,10 +145,11 @@ def str2bool(v):
 
 def get_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--bert_path', type=str, default='/home/data_ti4_c/caoyc/Pretrains/chinese-roberta-wwm-ext-large')
+    parser.add_argument('--bert_path', type=str, default='/home/data_ti4_c/caoyc/Pretrains/chinese-roberta-wwm-ext-large')  # 1024
+    # parser.add_argument('--bert_path', type=str, default='/home/data_ti4_c/caoyc/Pretrains/chinese-roberta-wwm-ext')        # 768
     parser.add_argument('--num_labels', type=int, default=3)
     parser.add_argument('--max_length', type=int, default=50)
-    parser.add_argument('--TestModel', type=str2bool, default=False)
+    parser.add_argument('--TestModel', type=str2bool, default=True)
     parser.add_argument('--data_root', type=str, default='../data')
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--eval_batch_size', type=int, default=32)
@@ -161,7 +162,7 @@ def main(gpus=None):
     args = parser.parse_args()
 
     # args.gpus = gpus if gpus is not None else len(over_gpus.split(','))
-    args.gpus = -1
+    args.gpus = [0]
     cache_path = './models'
     args.cache_path = cache_path
     args.workers = 4
@@ -219,7 +220,8 @@ def main(gpus=None):
                                              )
         trainer.fit(model)
     else:
-        best_model_path = './checkpoints/run1/checkpoint/epoch=01-dev_f1=0.7109.ckpt'
+        best_model_path = './checkpoints/run1/checkpoint/epoch=03-dev_f1=0.7411.ckpt'
+        best_model_path = '/home/caoyc/Financial_Project/Classifier/checkpoints/run1/checkpoint/epoch=05-dev_f1=0.7355.ckpt'
         checkpoint = torch.load(best_model_path)
         model_weights = checkpoint["state_dict"]
         for key in list(model_weights):
@@ -229,9 +231,20 @@ def main(gpus=None):
         predictions = trainer.predict(model, model.get_dataloader('test'))
         preds = torch.cat([x["pred"] for x in predictions], dim=0).tolist()
         indices = torch.cat([x["indices"] for x in predictions], dim=0).tolist()
-        preds = sorted([(a, b) for a, b in zip(indices, preds)], key=lambda x: x[0])
-        for idx, p in preds:
-            print(idx, p)
+        # preds = sorted([(a, b) for a, b in zip(indices, preds)], key=lambda x: x[0])
+        # for idx, p in preds:
+        #     print(idx, p)
+        f1 = f1_score(indices, preds, average='micro')
+        ans = precision_recall_fscore_support(indices, preds, average='micro', labels=[0,1,2])
+        print(ans)
+        '''
+        (0.8140703517587939, 0.8140703517587939, 0.8140703517587939, None)
+        (0.8140703517587939, 0.8140703517587939, 0.8140703517587939, None)
+        (0.7839195979899497, 0.7839195979899497, 0.7839195979899497, None)
+        (0.8140703517587939, 0.8140703517587939, 0.8140703517587939, None)
+        (0.7939698492462312, 0.7939698492462312, 0.7939698492462312, None)
+        (0.7738693467336684, 0.7738693467336684, 0.7738693467336684, None)
+        '''
 
 def out_file_call(gpus):
     from multiprocessing import freeze_support
